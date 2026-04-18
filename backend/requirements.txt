@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+psycopg2-binary
+spacy
+transformers
+torch
+dateparser
+pydantic
+python-dotenv
+python-multipart
+google-genai>=1.0.0
