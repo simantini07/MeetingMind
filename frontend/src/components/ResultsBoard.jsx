@@ -13,24 +13,11 @@ const item = {
   show: { opacity: 1, y: 0 },
 }
 
-const backendHint = (b) => {
-  if (b === 'groq')
-    return 'Groq analysis: summary, action items, deadlines, and follow-ups. Local BART / spaCy / DistilBERT stay loaded for ablation & extractive QA.'
-  if (b === 'gemini')
-    return 'Gemini analysis (used when Groq is not configured). Hybrid stack for your report.'
-  if (b === 'local_bart_opt_out')
-    return 'Local ablation: BART + rules (GROQ_ANALYZE=0 or GEMINI_ANALYZE=0).'
-  if (b === 'local_dev_only')
-    return 'Dev mode: local BART only (ALLOW_LOCAL_ANALYZE_WITHOUT_LLM). Add GROQ_API_KEY for LLM analyze.'
-  return 'Add GROQ_API_KEY to backend/.env (or GEMINI_API_KEY) for LLM meeting analysis.'
-}
-
 export default function ResultsBoard({
   summary,
   actionItems,
   followups,
   transcript,
-  analyzeBackend,
   onToggleTaskComplete,
 }) {
   return (
@@ -47,9 +34,6 @@ export default function ResultsBoard({
         <h3 className="text-xs font-semibold uppercase tracking-widest text-cyan-300/90">
           Summary
         </h3>
-        {analyzeBackend && (
-          <p className="mt-2 text-xs leading-snug text-slate-500">{backendHint(analyzeBackend)}</p>
-        )}
         <p className="mt-3 text-sm leading-relaxed text-slate-200">{summary}</p>
       </motion.section>
 

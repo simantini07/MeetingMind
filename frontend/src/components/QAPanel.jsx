@@ -18,12 +18,6 @@ export default function QAPanel({ meetingId, onAsk, loading, messages }) {
       className="rounded-2xl border border-white/10 bg-black/30 p-6 backdrop-blur-xl"
     >
       <h3 className="text-sm font-semibold text-white">Ask about this meeting</h3>
-      <p className="mt-1 text-xs text-slate-500">
-        Extractive QA over transcript · meeting ID{' '}
-        <code className="rounded bg-white/10 px-1.5 py-0.5 font-mono text-[10px] text-cyan-300">
-          {meetingId?.slice(0, 8)}…
-        </code>
-      </p>
 
       <div className="mt-4 max-h-64 space-y-3 overflow-y-auto rounded-xl border border-white/5 bg-black/40 p-3">
         <AnimatePresence initial={false}>

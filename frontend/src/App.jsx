@@ -210,12 +210,10 @@ export default function App() {
               </span>
             </h1>
             <p className="mt-4 text-base leading-relaxed text-slate-400">
-              Upload or paste a transcript. <strong className="text-slate-200">Groq</strong> (or Gemini)
-              drives summary, tasks, deadlines, and follow-ups;{' '}
-              <strong className="text-slate-200">BART</strong>,{' '}
-              <strong className="text-slate-200">spaCy</strong>, and{' '}
-              <strong className="text-slate-200">DistilBERT</strong> stay in the stack for hybrid demos
-              and extractive Q&amp;A.
+              Turn raw conversations into decisions and next steps—powered by{' '}
+              <strong className="text-slate-200">BART</strong>, <strong className="text-slate-200">spaCy</strong>,{' '}
+              <strong className="text-slate-200">DistilBERT</strong>, and <strong className="text-slate-200">Groq</strong>{' '}
+              for summaries, tasks, deadlines, follow-ups, and Q&amp;A.
             </p>
           </motion.div>
         </header>
@@ -245,21 +243,12 @@ export default function App() {
               onRefresh={refreshMeetings}
             />
             {result && (
-              <>
-                <motion.div
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200/90"
-                >
-                  Analysis saved · use the same backend PostgreSQL for demos and reports.
-                </motion.div>
-                <QAPanel
-                  meetingId={result.meeting_id}
-                  onAsk={onAsk}
-                  loading={qaLoading}
-                  messages={messages}
-                />
-              </>
+              <QAPanel
+                meetingId={result.meeting_id}
+                onAsk={onAsk}
+                loading={qaLoading}
+                messages={messages}
+              />
             )}
             {!result && (
               <div className="rounded-2xl border border-dashed border-white/15 bg-white/[0.02] p-8 text-center text-sm text-slate-500">
@@ -288,7 +277,6 @@ export default function App() {
               followups={result.followup_suggestions}
               transcript={result.transcript}
               actionItems={result.action_items}
-              analyzeBackend={result.analyze_backend}
               onToggleTaskComplete={toggleTaskComplete}
             />
           </motion.section>
