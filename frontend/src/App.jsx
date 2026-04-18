@@ -1,10 +1,58 @@
 import { motion } from 'framer-motion'
-import { useState, useCallback } from 'react'
-import { analyzeJson, analyzeUpload, askQuestion } from './api'
+import { useState, useCallback, useEffect } from 'react'
+import {
+  analyzeJson,
+  analyzeUpload,
+  askQuestion,
+  getMeeting,
+  listMeetings,
+  patchActionItemCompleted,
+  deleteMeeting as deleteMeetingApi,
+} from './api'
 import BubbleBackground from './components/BubbleBackground'
+import MeetingHistory from './components/MeetingHistory'
 import QAPanel from './components/QAPanel'
 import ResultsBoard from './components/ResultsBoard'
 import UploadPanel from './components/UploadPanel'
+
+function mapActionItems(items) {
+  return (items || []).map((a) => ({
+    id: a.id,
+    task_text: a.task_text,
+    owner: a.owner,
+    deadline_raw: a.deadline_raw,
+    deadline_iso: a.deadline_iso,
+    completed: !!a.completed,
+    completed_at: a.completed_at,
+  }))
+}
+
+/** Normalize GET /meeting/:id or POST /analyze response into one result shape. */
+function payloadToResult(payload) {
+  if (payload.meeting) {
+    const m = payload.meeting
+    const followups = m.followup_suggestions
+    return {
+      meeting_id: m.id,
+      title: m.title,
+      summary: m.summary ?? '',
+      transcript: m.transcript ?? '',
+      followup_suggestions: Array.isArray(followups) ? followups : [],
+      action_items: mapActionItems(payload.action_items),
+      analyze_backend: 'saved',
+    }
+  }
+  const fu = payload.followup_suggestions
+  return {
+    meeting_id: payload.meeting_id,
+    title: payload.title,
+    summary: payload.summary ?? '',
+    transcript: payload.transcript ?? '',
+    followup_suggestions: Array.isArray(fu) ? fu : [],
+    action_items: mapActionItems(payload.action_items),
+    analyze_backend: payload.analyze_backend,
+  }
+}
 
 export default function App() {
   const [title, setTitle] = useState('My meeting')
@@ -15,6 +63,78 @@ export default function App() {
   const [qaLoading, setQaLoading] = useState(false)
   const [result, setResult] = useState(null)
   const [messages, setMessages] = useState([])
+  const [meetings, setMeetings] = useState([])
+  const [meetingsLoading, setMeetingsLoading] = useState(true)
+
+  const refreshMeetings = useCallback(async () => {
+    setMeetingsLoading(true)
+    try {
+      const data = await listMeetings(50)
+      setMeetings(data.meetings || [])
+    } catch {
+      setMeetings([])
+    } finally {
+      setMeetingsLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    refreshMeetings()
+  }, [refreshMeetings])
+
+  const openMeeting = useCallback(async (meetingId) => {
+    setMessages([])
+    try {
+      const data = await getMeeting(meetingId)
+      setResult(payloadToResult(data))
+    } catch (e) {
+      const msg = e.response?.data?.detail || e.message || 'Could not load meeting'
+      alert(typeof msg === 'string' ? msg : JSON.stringify(msg))
+    }
+  }, [])
+
+  const deleteMeeting = useCallback(
+    async (meetingId) => {
+      if (!window.confirm('Delete this meeting, all tasks, and Q&A history for it?')) return
+      try {
+        await deleteMeetingApi(meetingId)
+        if (result?.meeting_id === meetingId) {
+          setResult(null)
+          setMessages([])
+        }
+        refreshMeetings()
+      } catch (e) {
+        const msg = e.response?.data?.detail || e.message || 'Delete failed'
+        alert(typeof msg === 'string' ? msg : JSON.stringify(msg))
+      }
+    },
+    [result?.meeting_id, refreshMeetings],
+  )
+
+  const toggleTaskComplete = useCallback(async (actionId, completed) => {
+    try {
+      const { action_item } = await patchActionItemCompleted(actionId, completed)
+      setResult((r) => {
+        if (!r?.action_items) return r
+        return {
+          ...r,
+          action_items: r.action_items.map((it) =>
+            it.id === actionId
+              ? {
+                  ...it,
+                  completed: action_item.completed,
+                  completed_at: action_item.completed_at,
+                }
+              : it,
+          ),
+        }
+      })
+      refreshMeetings()
+    } catch (e) {
+      const msg = e.response?.data?.detail || e.message || 'Update failed'
+      alert(typeof msg === 'string' ? msg : JSON.stringify(msg))
+    }
+  }, [refreshMeetings])
 
   const runAnalyze = useCallback(async () => {
     if (mode === 'paste' && !transcript.trim()) {
@@ -34,7 +154,8 @@ export default function App() {
       } else {
         data = await analyzeUpload({ file, title })
       }
-      setResult(data)
+      setResult(payloadToResult(data))
+      refreshMeetings()
     } catch (e) {
       const msg =
         e.response?.data?.detail ||
@@ -44,7 +165,7 @@ export default function App() {
     } finally {
       setLoading(false)
     }
-  }, [mode, title, transcript, file])
+  }, [mode, title, transcript, file, refreshMeetings])
 
   const onSubmitPaste = () => runAnalyze()
   const onSubmitFile = () => runAnalyze()
@@ -89,8 +210,12 @@ export default function App() {
               </span>
             </h1>
             <p className="mt-4 text-base leading-relaxed text-slate-400">
-              Upload or paste a transcript. We summarize, extract action items, surface follow-ups,
-              and answer questions — powered by BART, DistilBERT QA, and spaCy.
+              Upload or paste a transcript. <strong className="text-slate-200">Groq</strong> (or Gemini)
+              drives summary, tasks, deadlines, and follow-ups;{' '}
+              <strong className="text-slate-200">BART</strong>,{' '}
+              <strong className="text-slate-200">spaCy</strong>, and{' '}
+              <strong className="text-slate-200">DistilBERT</strong> stay in the stack for hybrid demos
+              and extractive Q&amp;A.
             </p>
           </motion.div>
         </header>
@@ -111,6 +236,14 @@ export default function App() {
           />
 
           <div className="space-y-6">
+            <MeetingHistory
+              meetings={meetings}
+              selectedId={result?.meeting_id}
+              onSelect={openMeeting}
+              onDelete={deleteMeeting}
+              loading={meetingsLoading}
+              onRefresh={refreshMeetings}
+            />
             {result && (
               <>
                 <motion.div
@@ -138,15 +271,25 @@ export default function App() {
 
         {result && (
           <motion.section
+            key={result.meeting_id}
             initial={{ opacity: 0, y: 24 }}
             animate={{ opacity: 1, y: 0 }}
             className="mt-12"
           >
-            <h2 className="mb-6 text-lg font-semibold text-white">Results</h2>
+            <h2 className="mb-6 text-lg font-semibold text-white">
+              Results
+              {result.title ? (
+                <span className="ml-2 text-base font-normal text-slate-400">· {result.title}</span>
+              ) : null}
+            </h2>
             <ResultsBoard
+              key={result.meeting_id}
               summary={result.summary}
-              actionItems={result.action_items}
               followups={result.followup_suggestions}
+              transcript={result.transcript}
+              actionItems={result.action_items}
+              analyzeBackend={result.analyze_backend}
+              onToggleTaskComplete={toggleTaskComplete}
             />
           </motion.section>
         )}

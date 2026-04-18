@@ -33,3 +33,18 @@ export async function getMeeting(meetingId) {
   const { data } = await api.get(`/meeting/${meetingId}`)
   return data
 }
+
+export async function listMeetings(limit = 50) {
+  const { data } = await api.get('/meetings', { params: { limit } })
+  return data
+}
+
+export async function patchActionItemCompleted(actionId, completed) {
+  const { data } = await api.patch(`/action-items/${actionId}`, { completed })
+  return data
+}
+
+export async function deleteMeeting(meetingId) {
+  const { data } = await api.delete(`/meeting/${meetingId}`)
+  return data
+}

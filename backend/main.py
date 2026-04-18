@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -18,7 +19,7 @@ from psycopg2.extras import RealDictCursor
 from transformers import pipeline
 
 # Load variables from backend/.env (create it from .env.example; .env is gitignored)
-load_dotenv(Path(__file__).resolve().parent / ".env")
+load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
 
 
 # --------- Config ---------
@@ -33,14 +34,45 @@ MAX_QA_CONTEXT_CHARS = 4000
 MIN_QA_CONFIDENCE = 0.20
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB
 
-# Gemini Q&A: set GEMINI_API_KEY in backend/.env or in the shell environment
+# Groq (preferred): OpenAI-compatible chat API — https://console.groq.com/keys
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip() or None
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+# Optional smaller/faster model for /ask only (saves cost vs 120B). Empty = same as GROQ_MODEL.
+GROQ_QA_MODEL = os.getenv("GROQ_QA_MODEL", "").strip() or None
+# On-demand tier TPM is often ~8k; large transcripts + high max_completion_tokens exceed it.
+# Raise GROQ_MAX_* only after upgrading tier or if Groq raises your limits.
+GROQ_MAX_TRANSCRIPT_CHARS = max(2000, int(os.getenv("GROQ_MAX_TRANSCRIPT_CHARS", "12000")))
+# /ask can use a smaller context than /analyze to save tokens per chat turn.
+GROQ_MAX_QA_TRANSCRIPT_CHARS = max(1500, int(os.getenv("GROQ_MAX_QA_TRANSCRIPT_CHARS", "8000")))
+GROQ_ANALYZE = os.getenv("GROQ_ANALYZE", "1").strip().lower() not in ("0", "false", "no")
+GROQ_MAX_RETRIES = max(1, int(os.getenv("GROQ_MAX_RETRIES", "5")))
+GROQ_RETRY_BASE_SEC = float(os.getenv("GROQ_RETRY_BASE_SEC", "2"))
+GROQ_TEMPERATURE_ANALYZE = float(os.getenv("GROQ_TEMPERATURE_ANALYZE", "0.2"))
+GROQ_TEMPERATURE_QA = float(os.getenv("GROQ_TEMPERATURE_QA", "0.2"))
+GROQ_MAX_TOKENS_ANALYZE = int(os.getenv("GROQ_MAX_TOKENS_ANALYZE", "2048"))
+GROQ_MAX_TOKENS_QA = int(os.getenv("GROQ_MAX_TOKENS_QA", "1024"))
+GROQ_TOP_P = float(os.getenv("GROQ_TOP_P", "1"))
+# Set to empty to omit (some endpoints/models reject unknown fields)
+GROQ_REASONING_EFFORT = os.getenv("GROQ_REASONING_EFFORT", "medium").strip() or None
+
+# Gemini (optional fallback if GROQ_API_KEY is not set)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip() or None
 # Use a model id your API key supports (see https://ai.google.dev/gemini-api/docs/models )
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-001")
 GEMINI_MAX_TRANSCRIPT_CHARS = int(os.getenv("GEMINI_MAX_TRANSCRIPT_CHARS", "100000"))
+# Retry transient 429 RESOURCE_EXHAUSTED (rate limits / “retry after N seconds”)
+GEMINI_MAX_RETRIES = max(1, int(os.getenv("GEMINI_MAX_RETRIES", "6")))
+GEMINI_RETRY_BASE_SEC = float(os.getenv("GEMINI_RETRY_BASE_SEC", "2"))
+# /analyze uses Gemini only for summary, action items, deadlines, follow-ups (when key is set).
+# Set GEMINI_ANALYZE=0 to force legacy local BART + heuristics (for ablation demos only).
+GEMINI_ANALYZE = os.getenv("GEMINI_ANALYZE", "1").strip().lower() not in ("0", "false", "no")
+# No GROQ/Gemini key: refuse /analyze unless this is enabled (offline / emergency dev only).
+ALLOW_LOCAL_ANALYZE_WITHOUT_LLM = os.getenv(
+    "ALLOW_LOCAL_ANALYZE_WITHOUT_LLM",
+    os.getenv("ALLOW_LOCAL_ANALYZE_WITHOUT_GEMINI", "0"),
+).strip().lower() in ("1", "true", "yes")
 # spaCy over huge transcripts is slow; full text still stored in DB for QA
 MAX_SPACY_INPUT_CHARS = int(os.getenv("MAX_SPACY_INPUT_CHARS", "150000"))
-
 
 # --------- App ---------
 app = FastAPI(title="MeetingMind API")
@@ -77,6 +109,10 @@ class AskRequest(BaseModel):
     question: str
 
 
+class ActionItemCompletedRequest(BaseModel):
+    completed: bool
+
+
 # --------- DB helpers ---------
 def get_conn():
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
@@ -99,7 +135,9 @@ def init_db():
         task_text TEXT NOT NULL,
         owner TEXT,
         deadline_raw TEXT,
-        deadline_iso TEXT
+        deadline_iso TEXT,
+        completed BOOLEAN NOT NULL DEFAULT FALSE,
+        completed_at TIMESTAMP NULL
     );
 
     CREATE TABLE IF NOT EXISTS qa_history (
@@ -117,12 +155,136 @@ def init_db():
         conn.commit()
 
 
+def migrate_action_items_tracking():
+    """Add task completion columns for DBs created before this feature."""
+    alters = (
+        "ALTER TABLE action_items ADD COLUMN IF NOT EXISTS completed BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE action_items ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP NULL",
+    )
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            for stmt in alters:
+                cur.execute(stmt)
+        conn.commit()
+
+
 @app.on_event("startup")
 def on_startup():
     init_db()
+    migrate_action_items_tracking()
 
 
 # --------- NLP helpers ---------
+# Spoken disfluencies / hedges — stripped from model inputs and from user-facing task text.
+_DISFLUENCY_TOKEN = re.compile(
+    r"(?<![A-Za-z])(?:"
+    r"uh|um|umm|erm|er|ah|hmm|hm|mm[\s-]?hmm|uh[\s-]?huh"
+    r")(?![A-Za-z])",
+    re.IGNORECASE,
+)
+_DISFLUENCY_PHRASE = re.compile(
+    r"(?i)\b(?:"
+    r"you know|i mean|sort of|kind of|wait once again|once again(?=[\s,.]|$)|"
+    r"like(?=\s+(?:i|the|a|an|this|that|we|you|it)\b)"
+    r")\b[,.!?:;]*\s*"
+)
+_LEADING_HEDGE = re.compile(
+    r"(?is)^(?:"
+    r"(?:yeah|yep|yes|ok|okay|well|so|and|but|no|right)[,.\s]+"
+    r")+"
+)
+_GREETING_ONLY_BODY = re.compile(
+    r"(?is)^(?:"
+    r"how(?:'s|\s+are)\s+you\b[^.!?]{0,80}|"
+    r"howdy\b[^.!?]{0,40}|"
+    r"hi\b[^.!?]{0,40}|"
+    r"hello\b[^.!?]{0,60}|"
+    r"good\s+(?:morning|afternoon|evening)\b[^.!?]{0,40}|"
+    r"hey\b[^.!?]{0,40}"
+    r")\.?$"
+)
+
+
+def _collapse_ws(text: str) -> str:
+    t = re.sub(r"\s+", " ", text).strip()
+    t = re.sub(r"^[,.;:\s]+", "", t)
+    return t
+
+
+def strip_disfluencies(text: str) -> str:
+    """Remove common spoken fillers so UI and models see clean English (any messy transcript)."""
+    if not text:
+        return ""
+    t = text
+    t = _DISFLUENCY_PHRASE.sub(" ", t)
+    t = _DISFLUENCY_TOKEN.sub(" ", t)
+    t = _LEADING_HEDGE.sub("", t)
+    t = re.sub(r"\s*[,;]\s*[,;]+\s*", ", ", t)
+    return _collapse_ws(t)
+
+
+_WORK_SUBSTANCE = re.compile(
+    r"(?i)("
+    r"project|deadline|integrat\w*|apis?\w*|backend|frontend|task|assign|report|build|implement\w*|"
+    r"discuss|blocker|professor|demo|ship|deploy|bug|feature|requirement|milestone|"
+    r"need to|have to|will\b|'ll\b|must\b|should\b|"
+    r"by (?:mon|tues|wed|thurs|fri|saturday|sunday)|"
+    r"meeting|transcript|zoom|teams"
+    r")"
+)
+
+
+def _line_is_small_talk(body: str) -> bool:
+    """True for greetings / back-channel only — dropped from summary input, not stored as tasks."""
+    c = strip_disfluencies(body).strip()
+    if not c:
+        return True
+    if len(c) <= 8:
+        return True
+    cl = c.lower()
+    if cl in ("howdy", "hey", "hi", "hello", "yeah", "yep", "okay", "ok", "thanks", "thank you"):
+        return True
+    if len(c) <= 96 and _GREETING_ONLY_BODY.match(c):
+        return True
+    if _WORK_SUBSTANCE.search(c):
+        return False
+    if len(c) < 36:
+        return True
+    return False
+
+
+def build_summary_source(text: str) -> str:
+    """Drop small-talk lines anywhere in the transcript for BART; keep order of substantive lines."""
+    kept: List[str] = []
+    for raw_line in text.split("\n"):
+        line = raw_line.strip()
+        if not line:
+            continue
+        m = re.match(r"^([^:]+):\s*(.+)$", line)
+        body = m.group(2).strip() if m else line
+        if _line_is_small_talk(body):
+            continue
+        kept.append(line)
+    if not kept:
+        return "\n".join(
+            strip_disfluencies(ln.strip()) for ln in text.splitlines() if ln.strip()
+        )
+    return "\n".join(strip_disfluencies(ln) for ln in kept)
+
+
+def compress_task_description(content: str, max_chars: int = 400) -> str:
+    """Turn a noisy speaker turn into a short task line for the UI (no uh/wait once again)."""
+    t = strip_disfluencies(content)
+    t = _LEADING_HEDGE.sub("", t)
+    t = _collapse_ws(t)
+    if len(t) <= max_chars:
+        return t
+    cut = t[: max_chars + 1]
+    if " " in cut:
+        cut = cut[: cut.rfind(" ")]
+    return cut.rstrip(",; ") + "…"
+
+
 def preprocess_transcript(text: str) -> str:
     """Normalize whitespace but keep newlines so Zoom closed-caption blocks stay parseable."""
     text = text.replace("\r\n", "\n").replace("\r", "\n")
@@ -182,7 +344,7 @@ def normalize_zoom_saved_captions(text: str) -> str:
 
 
 def _is_filler_utterance(content: str) -> bool:
-    sl = content.lower().strip()
+    sl = strip_disfluencies(content).lower().strip()
     if len(sl) < 14:
         return True
     filler = (
@@ -209,6 +371,7 @@ def _is_filler_utterance(content: str) -> bool:
         "okay, bye",
         "he can just start",
         "howdy",
+        "wait once again",
     )
     if any(x in sl for x in filler):
         return True
@@ -336,9 +499,12 @@ def _extract_action_items_from_speaker_lines(text: str) -> List[dict]:
             continue
 
         raw_deadline, iso_deadline = normalize_deadline(content)
+        polished = compress_task_description(content)
+        if len(polished) < 14:
+            continue
         items.append(
             {
-                "task_text": f"{speaker}: {content}",
+                "task_text": polished,
                 "owner": speaker,
                 "deadline_raw": raw_deadline,
                 "deadline_iso": iso_deadline,
@@ -371,9 +537,12 @@ def _extract_action_items_spacy_fallback(text: str) -> List[dict]:
                 continue
             owner = find_owner(s, nlp(s))
             raw_deadline, iso_deadline = normalize_deadline(s)
+            polished = compress_task_description(s)
+            if len(polished) < 14:
+                continue
             items.append(
                 {
-                    "task_text": s,
+                    "task_text": polished,
                     "owner": owner,
                     "deadline_raw": raw_deadline,
                     "deadline_iso": iso_deadline,
@@ -396,20 +565,25 @@ def generate_summary(text: str) -> str:
     body = (text or "")[:MAX_SUMMARY_INPUT_CHARS].strip()
     if not body:
         return ""
-    short_text = _truncate_for_bart_encoder(body)
+    summary_in = build_summary_source(body)
+    if not summary_in.strip():
+        summary_in = strip_disfluencies(body)
+    short_text = _truncate_for_bart_encoder(summary_in)
     try:
         result = summarizer(
             short_text,
             max_length=160,
-            min_length=30,
+            min_length=40,
             do_sample=False,
             truncation=True,
         )
-        return (result[0].get("summary_text") or "").strip()
+        out = (result[0].get("summary_text") or "").strip()
+        return strip_disfluencies(out)
     except Exception:
         # If GPU/CPU still fails, return a cheap extractive fallback
-        bits = re.split(r"(?<=[.!?])\s+", body[:4000])
-        return " ".join(bits[:5]).strip() or body[:800]
+        bits = re.split(r"(?<=[.!?])\s+", summary_in[:4000])
+        fallback = " ".join(bits[:5]).strip()
+        return strip_disfluencies(fallback) or strip_disfluencies(body[:800])
 
 
 def find_owner(sentence: str, doc) -> Optional[str]:
@@ -424,22 +598,89 @@ def find_owner(sentence: str, doc) -> Optional[str]:
 
 
 def normalize_deadline(sentence: str) -> tuple[Optional[str], Optional[str]]:
-    date_patterns = [
-        r"\bby\s+([A-Za-z0-9,\s]+)",
-        r"\bbefore\s+([A-Za-z0-9,\s]+)",
-        r"\bon\s+([A-Za-z0-9,\s]+)",
-        r"\bnext\s+[A-Za-z]+\b",
-        r"\bthis\s+[A-Za-z]+\b",
-        r"\btomorrow\b",
-        r"\bfriday\b|\bmonday\b|\btuesday\b|\bwednesday\b|\bthursday\b|\bsaturday\b|\bsunday\b",
+    """
+    Extract a deadline phrase and, when possible, a concrete calendar date.
+
+    Weekday phrases (e.g. "by Monday", "on Friday afternoon") are resolved to the next
+    matching date from *today* (server local time) via dateparser, so the UI shows a
+    real date instead of only the day name.
+    """
+    s = sentence.strip()
+    if not s:
+        return None, None
+
+    ref_now = datetime.now()
+    dp_future = {
+        "RELATIVE_BASE": ref_now,
+        "PREFER_DATES_FROM": "future",
+    }
+
+    wd = r"(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)"
+    # (pattern, kind): kind = weekday | relative | numeric | month
+    candidates: list[tuple[str, str]] = [
+        # "next Monday", "this Friday" (before bare weekday — longer match first)
+        (
+            rf"\b(?:next|this)\s+({wd})(?:\s+(?:morning|afternoon|evening|night))?\b",
+            "weekday",
+        ),
+        # ASR glitches: "done by. Wednesday", "by. Monday"
+        (rf"\bdone\s+by\.?\s*({wd})\b", "weekday"),
+        (rf"\bby\.?\s+({wd})(?:\s+(?:morning|afternoon|evening|night))?\b", "weekday"),
+        (rf"\bon\s+({wd})(?:\s+(?:morning|afternoon|evening))?\b", "weekday"),
+        (rf"\b({wd})(?:\s+(?:morning|afternoon|evening|night))\b", "weekday"),
+        (rf"\b(tomorrow|tonight|today)\b", "relative"),
+        (rf"\b(next\s+week)\b", "relative"),
+        (
+            rf"\bby\s+(\d{{1,2}}[/\-]\d{{1,2}}(?:[/\-]\d{{2,4}})?)\b",
+            "numeric",
+        ),
+        (
+            rf"\b((?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{{1,2}}(?:st|nd|rd|th)?(?:,?\s+\d{{4}})?)\b",
+            "month",
+        ),
     ]
-    for pattern in date_patterns:
-        m = re.search(pattern, sentence, flags=re.IGNORECASE)
-        if m:
-            raw_date = m.group(1).strip() if m.groups() else m.group(0).strip()
-            parsed = dateparser.parse(raw_date)
-            iso_date = parsed.date().isoformat() if parsed else None
-            return raw_date, iso_date
+
+    for pat, kind in candidates:
+        m = re.search(pat, s, re.IGNORECASE)
+        if not m:
+            continue
+        phrase = m.group(0).strip()
+
+        if kind == "weekday":
+            parsed = None
+            for cand in (phrase, m.group(1).strip() if m.lastindex else None):
+                if not cand:
+                    continue
+                parsed = dateparser.parse(cand, settings=dp_future)
+                if parsed:
+                    break
+            if parsed:
+                d = parsed.date()
+                iso = d.isoformat()
+                pretty = d.strftime("%a, %b %d, %Y")
+                return pretty, iso
+            return phrase, None
+
+        if kind == "relative":
+            raw_word = m.group(1)
+            parsed = dateparser.parse(raw_word, settings=dp_future)
+            iso = parsed.date().isoformat() if parsed else None
+            if parsed:
+                d = parsed.date()
+                pretty = d.strftime("%a, %b %d, %Y")
+                return pretty, iso
+            return phrase, iso
+
+        # numeric or full month string — safe to attach an ISO when parse works
+        raw_date = m.group(1).strip()
+        parsed = dateparser.parse(raw_date, settings=dp_future)
+        iso = parsed.date().isoformat() if parsed else None
+        if parsed:
+            d = parsed.date()
+            pretty = d.strftime("%a, %b %d, %Y")
+            return pretty, iso
+        return phrase, iso
+
     return None, None
 
 
@@ -545,8 +786,54 @@ def _gemini_error_http_detail(exc: Exception) -> tuple[int, str]:
             ),
         )
     if "429" in msg or "RESOURCE_EXHAUSTED" in msg or "quota" in msg.lower():
-        return 503, f"Gemini quota or rate limit: {msg}"
+        return (
+            503,
+            (
+                "Gemini returned 429 RESOURCE_EXHAUSTED (quota / rate limit).\n"
+                "What to try:\n"
+                "1) Wait a minute and retry — free tier has low per-minute caps.\n"
+                "2) If you see limit: 0 for free_tier, enable billing or a paid plan in Google AI Studio / Cloud, "
+                "or use a different Google account / project for the API key.\n"
+                "3) Switch model in backend/.env, e.g. GEMINI_MODEL=gemini-1.5-flash or gemini-2.0-flash "
+                "(see https://ai.google.dev/gemini-api/docs/models ).\n"
+                "4) Reduce calls: one /analyze per transcript; avoid rapid Q&A bursts.\n"
+                f"--- API message: {msg}"
+            ),
+        )
     return 502, f"Gemini Q&A failed: {msg}"
+
+
+def _parse_retry_after_seconds(msg: str) -> Optional[float]:
+    m = re.search(r"retry in ([\d.]+)\s*s", msg, re.I)
+    if m:
+        return min(float(m.group(1)) + 0.25, 120.0)
+    return None
+
+
+def _gemini_generate_content(client, *, model: str, contents: str, config) -> object:
+    """Call generate_content with retries on 429 (respect server “retry in Ns” when present)."""
+    last_exc: Optional[Exception] = None
+    for attempt in range(GEMINI_MAX_RETRIES):
+        try:
+            return client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=config,
+            )
+        except Exception as e:
+            last_exc = e
+            err = str(e)
+            if "429" not in err and "RESOURCE_EXHAUSTED" not in err:
+                raise
+            if attempt >= GEMINI_MAX_RETRIES - 1:
+                break
+            wait = _parse_retry_after_seconds(err)
+            if wait is None:
+                wait = min(GEMINI_RETRY_BASE_SEC * (2**attempt), 90.0)
+            time.sleep(wait)
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("Gemini retry loop exited without exception or response")
 
 
 def _genai_response_text(response) -> str:
@@ -581,7 +868,8 @@ def answer_with_gemini(transcript: str, question: str) -> str:
         f"Question: {question}\n\n"
         "Answer strictly from the transcript above."
     )
-    response = client.models.generate_content(
+    response = _gemini_generate_content(
+        client,
         model=GEMINI_MODEL,
         contents=user_message,
         config=types.GenerateContentConfig(
@@ -594,6 +882,313 @@ def answer_with_gemini(transcript: str, question: str) -> str:
     return out or (
         "The transcript does not contain enough information to answer this question."
     )
+
+
+GEMINI_ANALYZE_SYSTEM = (
+    "You are MeetingMind. You extract structured information from meeting transcripts only. "
+    "Do not invent facts. Output a single JSON object only—no markdown, no code fences, no commentary."
+)
+
+
+def _parse_json_object(raw: str) -> dict:
+    text = raw.strip()
+    m = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.DOTALL)
+    if m:
+        text = m.group(1)
+    else:
+        a, b = text.find("{"), text.rfind("}")
+        if a >= 0 and b > a:
+            text = text[a : b + 1]
+    return json.loads(text)
+
+
+def _meeting_analysis_from_parsed_json(data: dict) -> tuple[str, List[dict], List[str]]:
+    """Shared post-process for Gemini/Groq JSON analyze contract."""
+    summary = strip_disfluencies(str(data.get("summary") or "")).strip()
+    if not summary:
+        summary = "No summary could be extracted from this transcript."
+
+    out_items: List[dict] = []
+    for it in data.get("action_items") or []:
+        if not isinstance(it, dict):
+            continue
+        task = strip_disfluencies(str(it.get("task") or "")).strip()
+        if len(task) < 10:
+            continue
+        owner = it.get("owner")
+        if owner is not None:
+            owner = str(owner).strip() or None
+        dh = it.get("deadline_hint")
+        if dh is not None:
+            dh = str(dh).strip() or None
+
+        combined = f"{task} {dh}" if dh else task
+        raw_d, iso_d = normalize_deadline(combined)
+        if not raw_d and dh:
+            raw_d, iso_d = normalize_deadline(dh)
+        out_items.append(
+            {
+                "task_text": compress_task_description(task, max_chars=500),
+                "owner": owner,
+                "deadline_raw": raw_d,
+                "deadline_iso": iso_d,
+            }
+        )
+
+    followups: List[str] = []
+    for x in data.get("followup_suggestions") or []:
+        if isinstance(x, str):
+            s = strip_disfluencies(x).strip()
+            if s:
+                followups.append(s[:500])
+    if not followups:
+        followups = ["No specific follow-up was suggested beyond the action items above."]
+
+    return summary, out_items, followups
+
+
+def _groq_error_http_detail(exc: Exception) -> tuple[int, str]:
+    msg = str(exc)
+    if "401" in msg or "unauthorized" in msg.lower() or "invalid api key" in msg.lower():
+        return (
+            503,
+            "Groq API authentication failed. Check GROQ_API_KEY in backend/.env (https://console.groq.com/keys).",
+        )
+    if (
+        "413" in msg
+        or "too large" in msg.lower()
+        or "reduce your message" in msg.lower()
+        or ("TPM" in msg and "Limit" in msg)
+    ):
+        return (
+            413,
+            (
+                "Groq rejected the request: prompt + max output tokens exceed your tier limit (often 8000 TPM on-demand). "
+                "Fix: lower GROQ_MAX_TRANSCRIPT_CHARS (default 12000) and/or GROQ_MAX_TOKENS_ANALYZE (default 2048) in backend/.env, "
+                "or upgrade at https://console.groq.com/settings/billing — "
+                f"{msg}"
+            ),
+        )
+    if "429" in msg or "rate" in msg.lower():
+        return (
+            503,
+            f"Groq rate limit or quota. Wait and retry, or check https://console.groq.com/docs/rate-limits — {msg}",
+        )
+    return 502, f"Groq request failed: {msg}"
+
+
+def _groq_chat_completion_text(
+    messages: list,
+    *,
+    temperature: float,
+    max_completion_tokens: int,
+    model: Optional[str] = None,
+) -> str:
+    from groq import Groq
+
+    if not GROQ_API_KEY:
+        raise RuntimeError("GROQ_API_KEY is not set")
+
+    model_id = model or GROQ_MODEL
+    client = Groq(api_key=GROQ_API_KEY)
+
+    def _call(extra: dict) -> str:
+        completion = client.chat.completions.create(
+            model=model_id,
+            messages=messages,
+            temperature=temperature,
+            max_completion_tokens=max_completion_tokens,
+            top_p=GROQ_TOP_P,
+            stream=False,
+            **extra,
+        )
+        return (completion.choices[0].message.content or "").strip()
+
+    last_exc: Optional[Exception] = None
+    for attempt in range(GROQ_MAX_RETRIES):
+        extras: List[dict] = [{}]
+        if GROQ_REASONING_EFFORT:
+            extras.insert(0, {"reasoning_effort": GROQ_REASONING_EFFORT})
+        for extra in extras:
+            try:
+                return _call(extra)
+            except TypeError as e:
+                last_exc = e
+                continue
+            except Exception as e:
+                last_exc = e
+                err = str(e)
+                if "429" in err or "rate" in err.lower():
+                    time.sleep(min(GROQ_RETRY_BASE_SEC * (2**attempt), 60.0))
+                    break
+                if extra:
+                    continue
+                raise
+        else:
+            continue
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("Groq chat completion failed")
+
+
+def _clip_transcript_for_groq(transcript: str, max_chars: int) -> str:
+    """Fit transcript under Groq TPM limits; keep start + end (decisions often at the end)."""
+    t = transcript.strip()
+    if len(t) <= max_chars:
+        return t
+    overhead = 90
+    head = max(1500, (max_chars - overhead) // 2)
+    tail = max_chars - head - overhead
+    if tail < 800:
+        return t[:max_chars]
+    return (
+        t[:head]
+        + "\n\n[... middle of transcript omitted to fit API size limits ...]\n\n"
+        + t[-tail:]
+    )
+
+
+def _analyze_user_prompt(title: str, clipped: str) -> str:
+    return (
+        f"Meeting title: {title}\n\n"
+        f"--- TRANSCRIPT ---\n{clipped}\n--- END TRANSCRIPT ---\n\n"
+        "Return JSON with exactly this shape:\n"
+        '{"summary": "<2–6 sentences: topics, progress, decisions. No filler words. No raw transcript dump>",\n'
+        '"action_items": [\n'
+        '  {"task": "<short imperative, no uh/um/like>", "owner": "<person name or null>", '
+        '"deadline_hint": "<e.g. by Monday, Wednesday afternoon, or null>"}\n'
+        "],\n"
+        '"followup_suggestions": ["<1–4 short bullets: e.g. alignment meeting, risks, next check-in>"]\n'
+        "}\n\n"
+        "Rules:\n"
+        "- summary: synthesize the meeting; do NOT paste opening dialogue or list speakers verbatim.\n"
+        "- action_items: only real commitments, scheduled check-ins, or clear deliverables.\n"
+        "- Omit status-only updates, questions to the group, and vague fragments.\n"
+        "- deadline_hint only when the transcript states a time/day.\n"
+        "- followup_suggestions: grounded in the transcript; empty array if none needed.\n"
+        "- If there are no action items, use an empty array."
+    )
+
+
+def groq_analyze_meeting(title: str, transcript: str) -> tuple[str, List[dict], List[str]]:
+    """Structured meeting analysis via Groq chat completions (non-streaming)."""
+    if not GROQ_API_KEY:
+        raise RuntimeError("GROQ_API_KEY is not set")
+
+    size_steps = (
+        GROQ_MAX_TRANSCRIPT_CHARS,
+        max(4000, GROQ_MAX_TRANSCRIPT_CHARS // 2),
+        max(2500, GROQ_MAX_TRANSCRIPT_CHARS // 3),
+    )
+    tok_steps = (
+        GROQ_MAX_TOKENS_ANALYZE,
+        max(1024, GROQ_MAX_TOKENS_ANALYZE // 2),
+        max(512, GROQ_MAX_TOKENS_ANALYZE // 4),
+    )
+    last_exc: Optional[Exception] = None
+    for max_chars, max_tok in zip(size_steps, tok_steps):
+        clipped = _clip_transcript_for_groq(transcript, max_chars)
+        messages = [
+            {"role": "system", "content": GEMINI_ANALYZE_SYSTEM},
+            {"role": "user", "content": _analyze_user_prompt(title, clipped)},
+        ]
+        try:
+            raw = _groq_chat_completion_text(
+                messages,
+                temperature=GROQ_TEMPERATURE_ANALYZE,
+                max_completion_tokens=max_tok,
+                model=GROQ_MODEL,
+            )
+        except Exception as e:
+            last_exc = e
+            err = str(e)
+            if (max_chars, max_tok) == (size_steps[-1], tok_steps[-1]):
+                break
+            if any(
+                x in err
+                for x in (
+                    "413",
+                    "too large",
+                    "TPM",
+                    "rate_limit_exceeded",
+                    "Request too large",
+                )
+            ):
+                continue
+            raise
+        if not raw:
+            raise RuntimeError("Empty response from Groq analyze")
+        try:
+            data = _parse_json_object(raw)
+        except json.JSONDecodeError:
+            raise
+        return _meeting_analysis_from_parsed_json(data)
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("Groq analyze failed after size retries")
+
+
+def answer_with_groq(transcript: str, question: str) -> str:
+    if not GROQ_API_KEY:
+        raise RuntimeError("GROQ_API_KEY is not set")
+
+    clipped = _clip_transcript_for_groq(transcript, GROQ_MAX_QA_TRANSCRIPT_CHARS)
+    qa_model = GROQ_QA_MODEL or GROQ_MODEL
+    messages = [
+        {"role": "system", "content": GEMINI_SYSTEM_INSTRUCTION},
+        {
+            "role": "user",
+            "content": (
+                "Below is the ONLY source you may use.\n\n"
+                "--- MEETING TRANSCRIPT ---\n"
+                f"{clipped}\n"
+                "--- END TRANSCRIPT ---\n\n"
+                f"Question: {question}\n\n"
+                "Answer strictly from the transcript above."
+            ),
+        },
+    ]
+    out = _groq_chat_completion_text(
+        messages,
+        temperature=GROQ_TEMPERATURE_QA,
+        max_completion_tokens=GROQ_MAX_TOKENS_QA,
+        model=qa_model,
+    )
+    return out or (
+        "The transcript does not contain enough information to answer this question."
+    )
+
+
+def gemini_analyze_meeting(title: str, transcript: str) -> tuple[str, List[dict], List[str]]:
+    """
+    Generative NLP for /analyze: summary, action items, and follow-up suggestions (all from Gemini).
+    """
+    from google import genai
+    from google.genai import types
+
+    if not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY is not set")
+
+    clipped = transcript[:GEMINI_MAX_TRANSCRIPT_CHARS]
+    user_message = _analyze_user_prompt(title, clipped)
+
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    response = _gemini_generate_content(
+        client,
+        model=GEMINI_MODEL,
+        contents=user_message,
+        config=types.GenerateContentConfig(
+            system_instruction=GEMINI_ANALYZE_SYSTEM,
+            temperature=0.15,
+            max_output_tokens=4096,
+        ),
+    )
+    raw = _genai_response_text(response)
+    if not raw:
+        raise RuntimeError("Empty response from Gemini analyze")
+
+    data = _parse_json_object(raw)
+    return _meeting_analysis_from_parsed_json(data)
 
 
 def persist_meeting(
@@ -614,13 +1209,19 @@ def persist_meeting(
                 (meeting_id, title, cleaned, summary, json.dumps(followups)),
             )
             for item in action_items:
+                aid = str(uuid.uuid4())
+                item["id"] = aid
+                item["completed"] = False
+                item["completed_at"] = None
                 cur.execute(
                     """
-                    INSERT INTO action_items (id, meeting_id, task_text, owner, deadline_raw, deadline_iso)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                    INSERT INTO action_items (
+                        id, meeting_id, task_text, owner, deadline_raw, deadline_iso, completed, completed_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, FALSE, NULL)
                     """,
                     (
-                        str(uuid.uuid4()),
+                        aid,
                         meeting_id,
                         item["task_text"],
                         item["owner"],
@@ -632,18 +1233,68 @@ def persist_meeting(
 
 
 def run_analyze(title: str, raw_transcript: str) -> dict:
-    cleaned = preprocess_transcript(raw_transcript)
-    if not cleaned:
+    # Persist the full normalized upload (whitespace only). LLM/spaCy use a Zoom-normalized
+    # copy when applicable so analysis matches speaker turns without dropping content.
+    stored_transcript = preprocess_transcript(raw_transcript)
+    if not stored_transcript:
         raise HTTPException(status_code=400, detail="Transcript cannot be empty.")
-    if _looks_like_zoom_saved_captions(cleaned):
-        cleaned = normalize_zoom_saved_captions(cleaned)
+    cleaned = (
+        normalize_zoom_saved_captions(stored_transcript)
+        if _looks_like_zoom_saved_captions(stored_transcript)
+        else stored_transcript
+    )
 
-    summary = generate_summary(cleaned)
     spacy_slice = cleaned[:MAX_SPACY_INPUT_CHARS]
-    action_items = extract_action_items(spacy_slice)
-    followups = suggest_followups(spacy_slice, action_items)
+
+    use_groq = bool(GROQ_API_KEY and GROQ_ANALYZE)
+    use_gemini = bool(GEMINI_API_KEY and GEMINI_ANALYZE) and not use_groq
+
+    if use_groq:
+        try:
+            summary, action_items, followups = groq_analyze_meeting(title, cleaned)
+            analyze_backend = "groq"
+        except json.JSONDecodeError as e:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Groq returned invalid JSON for analysis. Try again or switch GROQ_MODEL. ({e})",
+            ) from e
+        except Exception as e:
+            status, detail = _groq_error_http_detail(e)
+            raise HTTPException(status_code=status, detail=detail) from e
+    elif use_gemini:
+        try:
+            summary, action_items, followups = gemini_analyze_meeting(title, cleaned)
+            analyze_backend = "gemini"
+        except json.JSONDecodeError as e:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Gemini returned invalid JSON for analysis. Try again or switch GEMINI_MODEL. ({e})",
+            ) from e
+        except Exception as e:
+            status, detail = _gemini_error_http_detail(e)
+            raise HTTPException(status_code=status, detail=detail) from e
+    elif (GROQ_API_KEY and not GROQ_ANALYZE) or (GEMINI_API_KEY and not GEMINI_ANALYZE):
+        summary = generate_summary(cleaned)
+        action_items = extract_action_items(spacy_slice)
+        followups = suggest_followups(spacy_slice, action_items)
+        analyze_backend = "local_bart_opt_out"
+    elif ALLOW_LOCAL_ANALYZE_WITHOUT_LLM:
+        summary = generate_summary(cleaned)
+        action_items = extract_action_items(spacy_slice)
+        followups = suggest_followups(spacy_slice, action_items)
+        analyze_backend = "local_dev_only"
+    else:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Meeting analysis requires an LLM API key. "
+                "Add GROQ_API_KEY to backend/.env (recommended), or GEMINI_API_KEY. "
+                "See .env.example. For offline dev only: ALLOW_LOCAL_ANALYZE_WITHOUT_LLM=1."
+            ),
+        )
+
     meeting_id = str(uuid.uuid4())
-    persist_meeting(meeting_id, title, cleaned, summary, followups, action_items)
+    persist_meeting(meeting_id, title, stored_transcript, summary, followups, action_items)
 
     return {
         "meeting_id": meeting_id,
@@ -651,17 +1302,51 @@ def run_analyze(title: str, raw_transcript: str) -> dict:
         "summary": summary,
         "action_items": action_items,
         "followup_suggestions": followups,
+        "analyze_backend": analyze_backend,
+        "transcript": stored_transcript,
     }
 
 
 # --------- API routes ---------
 @app.get("/health")
 def health():
+    groq_on = bool(GROQ_API_KEY and GROQ_ANALYZE)
+    gem_on = bool(GEMINI_API_KEY and GEMINI_ANALYZE) and not groq_on
+    hybrid = groq_on or gem_on
     return {
         "status": "ok",
         "time": datetime.utcnow().isoformat(),
+        "pipeline": "hybrid" if hybrid else "local",
+        "groq_configured": bool(GROQ_API_KEY),
+        "groq_model": GROQ_MODEL if GROQ_API_KEY else None,
+        "groq_qa_model": (GROQ_QA_MODEL or GROQ_MODEL) if GROQ_API_KEY else None,
+        "groq_max_qa_transcript_chars": GROQ_MAX_QA_TRANSCRIPT_CHARS if GROQ_API_KEY else None,
+        "groq_analyze_enabled": groq_on,
         "gemini_configured": bool(GEMINI_API_KEY),
         "gemini_model": GEMINI_MODEL if GEMINI_API_KEY else None,
+        "gemini_analyze_enabled": gem_on,
+        "analyze_path": (
+            "groq (summary, action items, deadlines, follow-ups)"
+            if groq_on
+            else (
+                "gemini (summary, action items, deadlines, follow-ups)"
+                if gem_on
+                else (
+                    "local or disabled — set GROQ_API_KEY (or GEMINI_API_KEY)"
+                    if not ALLOW_LOCAL_ANALYZE_WITHOUT_LLM
+                    else "local allowed without LLM API key (dev)"
+                )
+            )
+        ),
+        "local_nlp_loaded": (
+            "bart-large-cnn, spaCy en_core_web_sm, distilbert-base QA (Q&A, optional ablation / dev)"
+        ),
+        "hybrid_description": (
+            "Hybrid for reports: Groq or Gemini for /analyze + Q&A when configured; "
+            "local BART/spaCy/DistilBERT always loaded."
+            if hybrid
+            else "Add GROQ_API_KEY (recommended) or GEMINI_API_KEY for LLM meeting analysis."
+        ),
     }
 
 
@@ -700,7 +1385,12 @@ async def analyze_upload(
 
 @app.post("/ask")
 def ask(req: AskRequest):
-    qa_backend = "gemini" if GEMINI_API_KEY else "extractive"
+    if GROQ_API_KEY:
+        qa_backend = "groq"
+    elif GEMINI_API_KEY:
+        qa_backend = "gemini"
+    else:
+        qa_backend = "extractive"
 
     with get_conn() as conn:
         with conn.cursor() as cur:
@@ -711,7 +1401,14 @@ def ask(req: AskRequest):
 
             full_transcript = row["transcript"]
 
-            if GEMINI_API_KEY:
+            if GROQ_API_KEY:
+                try:
+                    answer = answer_with_groq(full_transcript, req.question)
+                    score = 1.0
+                except Exception as e:
+                    status, detail = _groq_error_http_detail(e)
+                    raise HTTPException(status_code=status, detail=detail) from e
+            elif GEMINI_API_KEY:
                 try:
                     answer = answer_with_gemini(full_transcript, req.question)
                     score = 1.0
@@ -751,13 +1448,73 @@ def ask(req: AskRequest):
     }
 
 
+@app.get("/meetings")
+def list_meetings(limit: int = 50):
+    """Past meetings with open/total task counts for the history sidebar."""
+    limit = min(max(limit, 1), 100)
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT m.id, m.title, m.created_at,
+                  COALESCE(
+                    COUNT(ai.id) FILTER (WHERE NOT COALESCE(ai.completed, false)), 0
+                  )::int AS open_tasks,
+                  COALESCE(COUNT(ai.id), 0)::int AS total_tasks
+                FROM meetings m
+                LEFT JOIN action_items ai ON ai.meeting_id = m.id
+                GROUP BY m.id
+                ORDER BY m.created_at DESC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            rows = cur.fetchall()
+    return {"meetings": rows}
+
+
+@app.patch("/action-items/{action_id}")
+def patch_action_item_completed(action_id: str, body: ActionItemCompletedRequest):
+    """Mark an action item done or not done (persists for past meetings)."""
+    completed_at: Optional[datetime] = datetime.utcnow() if body.completed else None
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE action_items
+                SET completed = %s, completed_at = %s
+                WHERE id = %s
+                RETURNING id, meeting_id, task_text, owner, deadline_raw, deadline_iso, completed, completed_at
+                """,
+                (body.completed, completed_at, action_id),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    if not row:
+        raise HTTPException(status_code=404, detail="Action item not found.")
+    return {"action_item": dict(row)}
+
+
+@app.delete("/meeting/{meeting_id}")
+def delete_meeting(meeting_id: str):
+    """Remove a meeting and cascaded action items / Q&A history."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM meetings WHERE id = %s RETURNING id", (meeting_id,))
+            row = cur.fetchone()
+        conn.commit()
+    if not row:
+        raise HTTPException(status_code=404, detail="Meeting not found.")
+    return {"deleted": True, "meeting_id": meeting_id}
+
+
 @app.get("/meeting/{meeting_id}")
 def get_meeting(meeting_id: str):
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id, title, summary, followup_suggestions, created_at
+                SELECT id, title, transcript, summary, followup_suggestions, created_at
                 FROM meetings
                 WHERE id = %s
                 """,
@@ -769,9 +1526,10 @@ def get_meeting(meeting_id: str):
 
             cur.execute(
                 """
-                SELECT task_text, owner, deadline_raw, deadline_iso
+                SELECT id, task_text, owner, deadline_raw, deadline_iso, completed, completed_at
                 FROM action_items
                 WHERE meeting_id = %s
+                ORDER BY id
                 """,
                 (meeting_id,),
             )

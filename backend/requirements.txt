@@ -8,4 +8,5 @@ dateparser
 pydantic
 python-dotenv
 python-multipart
+groq>=0.4.0
 google-genai>=1.0.0
