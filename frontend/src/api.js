@@ -48,3 +48,30 @@ export async function deleteMeeting(meetingId) {
   const { data } = await api.delete(`/meeting/${meetingId}`)
   return data
 }
+
+export async function getCalendarStatus() {
+  const { data } = await api.get('/calendar/status')
+  return data
+}
+
+export async function getCalendarOAuthUrl() {
+  const { data } = await api.get('/calendar/oauth/url')
+  return data
+}
+
+export async function getCalendarEvents(maxResults = 25) {
+  const { data } = await api.get('/calendar/events', {
+    params: { max_results: maxResults },
+  })
+  return data
+}
+
+export async function createCalendarEvent(payload) {
+  const { data } = await api.post('/calendar/events', payload)
+  return data
+}
+
+export async function disconnectCalendar() {
+  const { data } = await api.delete('/calendar/oauth')
+  return data
+}

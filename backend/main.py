@@ -3,22 +3,25 @@ import os
 import re
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional
+from urllib.parse import quote
 
 from dotenv import load_dotenv
 
 import dateparser
 import psycopg2
 import spacy
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+import google_calendar
+from fastapi import APIRouter, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from psycopg2.extras import RealDictCursor
 from transformers import pipeline
 
-# Load variables from backend/.env (create it from .env.example; .env is gitignored)
+# Load variables from backend/.env (.env is gitignored)
 load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
 
 
@@ -113,9 +116,28 @@ class ActionItemCompletedRequest(BaseModel):
     completed: bool
 
 
+class CreateCalendarEventRequest(BaseModel):
+    meeting_id: str
+    title: Optional[str] = None
+    description: Optional[str] = None
+    start_iso: Optional[str] = None
+    duration_minutes: int = 60
+    timezone: str = "UTC"
+    add_meet_link: bool = False
+
+
 # --------- DB helpers ---------
 def get_conn():
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+
+
+def _datetime_as_utc(dt: Optional[datetime]) -> Optional[datetime]:
+    """Attach UTC for JSON: naive TIMESTAMP from Postgres is interpreted as UTC wall time."""
+    if dt is None:
+        return None
+    if getattr(dt, "tzinfo", None) is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 def init_db():
@@ -168,10 +190,60 @@ def migrate_action_items_tracking():
         conn.commit()
 
 
+def migrate_google_calendar():
+    """OAuth token store + optional links on meetings."""
+    stmts = (
+        """
+        CREATE TABLE IF NOT EXISTS app_oauth (
+            provider TEXT PRIMARY KEY,
+            refresh_token TEXT NOT NULL,
+            updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+        )
+        """,
+        "ALTER TABLE meetings ADD COLUMN IF NOT EXISTS google_calendar_event_id TEXT NULL",
+        "ALTER TABLE meetings ADD COLUMN IF NOT EXISTS google_calendar_html_link TEXT NULL",
+    )
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            for stmt in stmts:
+                cur.execute(stmt)
+        conn.commit()
+
+
+def get_google_calendar_refresh_token() -> Optional[str]:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT refresh_token FROM app_oauth WHERE provider = %s",
+                ("google_calendar",),
+            )
+            row = cur.fetchone()
+    if not row:
+        return None
+    t = row.get("refresh_token")
+    return str(t).strip() or None
+
+
+def save_google_calendar_refresh_token(token: str) -> None:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO app_oauth (provider, refresh_token, updated_at)
+                VALUES ('google_calendar', %s, NOW())
+                ON CONFLICT (provider) DO UPDATE
+                SET refresh_token = EXCLUDED.refresh_token, updated_at = NOW()
+                """,
+                (token,),
+            )
+        conn.commit()
+
+
 @app.on_event("startup")
 def on_startup():
     init_db()
     migrate_action_items_tracking()
+    migrate_google_calendar()
 
 
 # --------- NLP helpers ---------
@@ -1273,25 +1345,12 @@ def run_analyze(title: str, raw_transcript: str) -> dict:
         except Exception as e:
             status, detail = _gemini_error_http_detail(e)
             raise HTTPException(status_code=status, detail=detail) from e
-    elif (GROQ_API_KEY and not GROQ_ANALYZE) or (GEMINI_API_KEY and not GEMINI_ANALYZE):
-        summary = generate_summary(cleaned)
-        action_items = extract_action_items(spacy_slice)
-        followups = suggest_followups(spacy_slice, action_items)
-        analyze_backend = "local_bart_opt_out"
-    elif ALLOW_LOCAL_ANALYZE_WITHOUT_LLM:
-        summary = generate_summary(cleaned)
-        action_items = extract_action_items(spacy_slice)
-        followups = suggest_followups(spacy_slice, action_items)
-        analyze_backend = "local_dev_only"
     else:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Meeting analysis requires an LLM API key. "
-                "Add GROQ_API_KEY to backend/.env (recommended), or GEMINI_API_KEY. "
-                "See .env.example. For offline dev only: ALLOW_LOCAL_ANALYZE_WITHOUT_LLM=1."
-            ),
-        )
+        # Local: BART + heuristics (no Groq/Gemini analyze, or no API keys)
+        summary = generate_summary(cleaned)
+        action_items = extract_action_items(spacy_slice)
+        followups = suggest_followups(spacy_slice, action_items)
+        analyze_backend = "local_fallback"
 
     meeting_id = str(uuid.uuid4())
     persist_meeting(meeting_id, title, stored_transcript, summary, followups, action_items)
@@ -1308,6 +1367,16 @@ def run_analyze(title: str, raw_transcript: str) -> dict:
 
 
 # --------- API routes ---------
+@app.get("/")
+def root():
+    return {
+        "service": "MeetingMind API",
+        "docs": "/docs",
+        "health": "/health",
+        "calendar_oauth_callback": "/calendar/oauth/callback (also /api/calendar/oauth/callback)",
+    }
+
+
 @app.get("/health")
 def health():
     groq_on = bool(GROQ_API_KEY and GROQ_ANALYZE)
@@ -1347,6 +1416,8 @@ def health():
             if hybrid
             else "Add GROQ_API_KEY (recommended) or GEMINI_API_KEY for LLM meeting analysis."
         ),
+        "google_calendar_oauth_configured": google_calendar.oauth_configured(),
+        "google_calendar_connected": bool(get_google_calendar_refresh_token()),
     }
 
 
@@ -1470,7 +1541,12 @@ def list_meetings(limit: int = 50):
                 (limit,),
             )
             rows = cur.fetchall()
-    return {"meetings": rows}
+    meetings = []
+    for row in rows:
+        r = dict(row)
+        r["created_at"] = _datetime_as_utc(r.get("created_at"))
+        meetings.append(r)
+    return {"meetings": meetings}
 
 
 @app.patch("/action-items/{action_id}")
@@ -1514,7 +1590,8 @@ def get_meeting(meeting_id: str):
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id, title, transcript, summary, followup_suggestions, created_at
+                SELECT id, title, transcript, summary, followup_suggestions, created_at,
+                  google_calendar_event_id, google_calendar_html_link
                 FROM meetings
                 WHERE id = %s
                 """,
@@ -1535,4 +1612,186 @@ def get_meeting(meeting_id: str):
             )
             actions = cur.fetchall()
 
-    return {"meeting": meeting, "action_items": actions}
+    md = dict(meeting)
+    md["created_at"] = _datetime_as_utc(md.get("created_at"))
+    action_rows = []
+    for a in actions:
+        ad = dict(a)
+        ad["completed_at"] = _datetime_as_utc(ad.get("completed_at"))
+        action_rows.append(ad)
+
+    return {"meeting": md, "action_items": action_rows}
+
+
+def _calendar_parse_start(start_iso: Optional[str], tz_name: str) -> datetime:
+    tz_name = (tz_name or "UTC").strip() or "UTC"
+    if start_iso and str(start_iso).strip():
+        dt = dateparser.parse(
+            str(start_iso).strip(),
+            settings={
+                "TIMEZONE": tz_name,
+                "RETURN_AS_TIMEZONE_AWARE": True,
+                "PREFER_DATES_FROM": "future",
+            },
+        )
+        if not dt:
+            raise HTTPException(status_code=400, detail="Could not parse start time.")
+        return dt
+    return datetime.now(timezone.utc) + timedelta(hours=1)
+
+
+calendar_router = APIRouter(prefix="/calendar", tags=["calendar"])
+
+
+@calendar_router.get("/status")
+def calendar_status():
+    return {
+        "oauth_configured": google_calendar.oauth_configured(),
+        "connected": bool(get_google_calendar_refresh_token()),
+        # Paste this exact string into Google Cloud → Credentials → OAuth client → Authorized redirect URIs
+        "oauth_redirect_uri": google_calendar.get_redirect_uri(),
+    }
+
+
+@calendar_router.get("/oauth/url")
+def calendar_oauth_url():
+    if not google_calendar.oauth_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Google Calendar OAuth is not configured (client id, secret, redirect URI).",
+        )
+    try:
+        url = google_calendar.authorization_url()
+    except ValueError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    return {"url": url}
+
+
+@calendar_router.get("/oauth/callback")
+def calendar_oauth_callback(code: Optional[str] = None, error: Optional[str] = None):
+    frontend = os.getenv(
+        "GOOGLE_CALENDAR_FRONTEND_URL",
+        "http://127.0.0.1:5173",
+    ).rstrip("/")
+    if error:
+        return RedirectResponse(
+            url=f"{frontend}/?calendar_error={quote(error)}",
+            status_code=302,
+        )
+    if not code:
+        return RedirectResponse(
+            url=f"{frontend}/?calendar_error=missing_code",
+            status_code=302,
+        )
+    if not google_calendar.oauth_configured():
+        return RedirectResponse(
+            url=f"{frontend}/?calendar_error=not_configured",
+            status_code=302,
+        )
+    try:
+        creds = google_calendar.exchange_code(code)
+        save_google_calendar_refresh_token(creds.refresh_token)
+    except Exception as e:
+        return RedirectResponse(
+            url=f"{frontend}/?calendar_error={quote(str(e))}",
+            status_code=302,
+        )
+    return RedirectResponse(url=f"{frontend}/?calendar=connected", status_code=302)
+
+
+@calendar_router.delete("/oauth")
+def calendar_oauth_disconnect():
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM app_oauth WHERE provider = %s",
+                ("google_calendar",),
+            )
+        conn.commit()
+    return {"disconnected": True}
+
+
+@calendar_router.get("/events")
+def calendar_events(max_results: int = 25):
+    token = get_google_calendar_refresh_token()
+    if not token:
+        raise HTTPException(
+            status_code=401,
+            detail="Google Calendar is not connected. Open /calendar/oauth/url and complete OAuth.",
+        )
+    try:
+        data = google_calendar.list_now_and_upcoming(token, max_results=max_results)
+    except Exception as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Google Calendar API error: {e}",
+        ) from e
+    return data
+
+
+@calendar_router.post("/events")
+def calendar_create_event(body: CreateCalendarEventRequest):
+    if not google_calendar.oauth_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Google Calendar OAuth is not configured.",
+        )
+    token = get_google_calendar_refresh_token()
+    if not token:
+        raise HTTPException(status_code=401, detail="Google Calendar is not connected.")
+
+    duration = min(max(int(body.duration_minutes), 5), 24 * 60)
+    start = _calendar_parse_start(body.start_iso, body.timezone)
+    end = start + timedelta(minutes=duration)
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT title, summary FROM meetings WHERE id = %s",
+                (body.meeting_id,),
+            )
+            row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Meeting not found.")
+
+    title = (body.title or row["title"] or "Meeting").strip()
+    description = (body.description or row["summary"] or "").strip()
+
+    try:
+        created = google_calendar.insert_calendar_event(
+            token,
+            summary=title,
+            description=description,
+            start=start,
+            end=end,
+            timezone_name=body.timezone.strip() or "UTC",
+            add_meet_link=body.add_meet_link,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+
+    event_id = created.get("id")
+    html_link = created.get("html_link")
+    if event_id:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE meetings
+                    SET google_calendar_event_id = %s,
+                        google_calendar_html_link = %s
+                    WHERE id = %s
+                    """,
+                    (event_id, html_link, body.meeting_id),
+                )
+            conn.commit()
+
+    return {
+        "event_id": event_id,
+        "html_link": html_link,
+        "hangout_link": created.get("hangout_link"),
+    }
+
+
+app.include_router(calendar_router)
+app.include_router(calendar_router, prefix="/api")

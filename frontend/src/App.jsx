@@ -10,6 +10,7 @@ import {
   deleteMeeting as deleteMeetingApi,
 } from './api'
 import BubbleBackground from './components/BubbleBackground'
+import CalendarPanel from './components/CalendarPanel'
 import MeetingHistory from './components/MeetingHistory'
 import QAPanel from './components/QAPanel'
 import ResultsBoard from './components/ResultsBoard'
@@ -40,6 +41,8 @@ function payloadToResult(payload) {
       followup_suggestions: Array.isArray(followups) ? followups : [],
       action_items: mapActionItems(payload.action_items),
       analyze_backend: 'saved',
+      google_calendar_event_id: m.google_calendar_event_id ?? null,
+      google_calendar_html_link: m.google_calendar_html_link ?? null,
     }
   }
   const fu = payload.followup_suggestions
@@ -51,6 +54,8 @@ function payloadToResult(payload) {
     followup_suggestions: Array.isArray(fu) ? fu : [],
     action_items: mapActionItems(payload.action_items),
     analyze_backend: payload.analyze_backend,
+    google_calendar_event_id: null,
+    google_calendar_html_link: null,
   }
 }
 
@@ -65,6 +70,7 @@ export default function App() {
   const [messages, setMessages] = useState([])
   const [meetings, setMeetings] = useState([])
   const [meetingsLoading, setMeetingsLoading] = useState(true)
+  const [calendarAuthVersion, setCalendarAuthVersion] = useState(0)
 
   const refreshMeetings = useCallback(async () => {
     setMeetingsLoading(true)
@@ -81,6 +87,24 @@ export default function App() {
   useEffect(() => {
     refreshMeetings()
   }, [refreshMeetings])
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const cal = params.get('calendar')
+    const err = params.get('calendar_error')
+    if (!cal && !err) return
+    const path = window.location.pathname
+    if (cal === 'connected') params.delete('calendar')
+    if (err) params.delete('calendar_error')
+    const qs = params.toString()
+    window.history.replaceState({}, '', `${path}${qs ? `?${qs}` : ''}`)
+    if (cal === 'connected') {
+      setCalendarAuthVersion((v) => v + 1)
+    }
+    if (err) {
+      alert(decodeURIComponent(err))
+    }
+  }, [])
 
   const openMeeting = useCallback(async (meetingId) => {
     setMessages([])
@@ -135,6 +159,10 @@ export default function App() {
       alert(typeof msg === 'string' ? msg : JSON.stringify(msg))
     }
   }, [refreshMeetings])
+
+  const onCalendarLinked = useCallback((fields) => {
+    setResult((r) => (r ? { ...r, ...fields } : r))
+  }, [])
 
   const runAnalyze = useCallback(async () => {
     if (mode === 'paste' && !transcript.trim()) {
@@ -241,6 +269,15 @@ export default function App() {
               onDelete={deleteMeeting}
               loading={meetingsLoading}
               onRefresh={refreshMeetings}
+            />
+            <CalendarPanel
+              authVersion={calendarAuthVersion}
+              meetingId={result?.meeting_id}
+              meetingTitle={result?.title}
+              meetingSummary={result?.summary}
+              calendarHtmlLink={result?.google_calendar_html_link}
+              onCalendarLinked={onCalendarLinked}
+              actionItems={result?.action_items}
             />
             {result && (
               <QAPanel

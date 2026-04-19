@@ -23,8 +23,8 @@ You can copy the sections below into your report, slides, or README.
 
 ## Configuration (reproducibility)
 
-- Copy `backend/.env.example` to `backend/.env`.
-- Set **`GROQ_API_KEY`** for default LLM `/analyze` + Q&A (see `backend/.env.example`).
+- Create `backend/.env` (gitignored) for local secrets.
+- Set **`GROQ_API_KEY`** for default LLM `/analyze` + Q&A.
 - **`GEMINI_API_KEY`**: optional fallback if Groq is not configured.
 - **`GROQ_ANALYZE=0` / `GEMINI_ANALYZE=0`**: force local BART + heuristics for `/analyze`.
 - **`ALLOW_LOCAL_ANALYZE_WITHOUT_LLM=1`**: allow `/analyze` without any LLM key (offline only).
