@@ -1,8 +1,14 @@
 import { motion, AnimatePresence } from 'framer-motion'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
-export default function QAPanel({ meetingId, onAsk, loading, messages }) {
+export default function QAPanel({ meetingId, onAsk, loading, messages, className = '' }) {
   const [q, setQ] = useState('')
+  const scrollRef = useRef(null)
+
+  useEffect(() => {
+    const el = scrollRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [messages])
 
   const submit = async (e) => {
     e.preventDefault()
@@ -15,11 +21,17 @@ export default function QAPanel({ meetingId, onAsk, loading, messages }) {
     <motion.div
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
-      className="rounded-2xl border border-white/10 bg-black/30 p-6 backdrop-blur-xl"
+      className={`flex min-h-0 flex-col rounded-2xl border border-white/10 bg-black/30 p-6 backdrop-blur-xl ${className}`}
     >
-      <h3 className="text-sm font-semibold text-white">Ask about this meeting</h3>
+      <h3 className="shrink-0 text-sm font-semibold text-white">Ask about this meeting</h3>
 
-      <div className="mt-4 max-h-64 space-y-3 overflow-y-auto rounded-xl border border-white/5 bg-black/40 p-3">
+      <div
+        ref={scrollRef}
+        className="mt-4 min-h-[7rem] max-h-[min(20rem,42vh)] flex-1 space-y-3 overflow-y-auto overflow-x-hidden overscroll-contain rounded-xl border border-white/5 bg-black/40 p-3"
+        role="log"
+        aria-relevant="additions"
+        aria-label="Chat messages"
+      >
         <AnimatePresence initial={false}>
           {messages.length === 0 && (
             <p className="text-center text-sm text-slate-500">Ask a question to see answers here.</p>
@@ -50,7 +62,7 @@ export default function QAPanel({ meetingId, onAsk, loading, messages }) {
         </AnimatePresence>
       </div>
 
-      <form onSubmit={submit} className="mt-4 flex gap-2">
+      <form onSubmit={submit} className="mt-4 flex shrink-0 gap-2">
         <input
           value={q}
           onChange={(e) => setQ(e.target.value)}

@@ -13,6 +13,7 @@ const tabs = [
 ]
 
 export default function UploadPanel({
+  fillColumn = false,
   title,
   setTitle,
   transcript,
@@ -46,13 +47,15 @@ export default function UploadPanel({
       initial={{ opacity: 0, y: 16 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.45 }}
-      className="relative overflow-hidden rounded-2xl border border-white/10 bg-white/[0.04] p-6 shadow-2xl shadow-cyan-500/5 backdrop-blur-xl md:p-8"
+      className={`relative overflow-hidden rounded-2xl border border-white/10 bg-white/[0.04] p-6 shadow-2xl shadow-cyan-500/5 backdrop-blur-xl md:p-8 ${
+        fillColumn ? 'flex h-full min-h-0 flex-col' : ''
+      }`}
     >
       <div
         className={
-          loading
-            ? 'pointer-events-none select-none opacity-[0.32] transition-opacity duration-300'
-            : ''
+          (loading
+            ? 'pointer-events-none select-none opacity-[0.32] transition-opacity duration-300 '
+            : '') + (fillColumn ? 'flex min-h-0 flex-1 flex-col' : '')
         }
         aria-hidden={loading}
       >
@@ -96,16 +99,18 @@ export default function UploadPanel({
       />
 
       {mode === 'paste' ? (
-        <>
-          <label className="mb-3 block text-xs font-medium uppercase tracking-wider text-slate-500">
+        <div className={fillColumn ? 'flex min-h-0 flex-1 flex-col' : ''}>
+          <label className="mb-3 block shrink-0 text-xs font-medium uppercase tracking-wider text-slate-500">
             Transcript
           </label>
           <textarea
             value={transcript}
             onChange={(e) => setTranscript(e.target.value)}
-            rows={12}
+            rows={fillColumn ? 6 : 12}
             placeholder="Paste meeting transcript here..."
-            className="mb-6 w-full resize-y rounded-xl border border-white/10 bg-black/40 px-4 py-3 font-mono text-sm leading-relaxed text-slate-200 placeholder:text-slate-600 focus:border-cyan-500/50 focus:outline-none focus:ring-2 focus:ring-cyan-500/20"
+            className={`mb-6 w-full resize-y rounded-xl border border-white/10 bg-black/40 px-4 py-3 font-mono text-sm leading-relaxed text-slate-200 placeholder:text-slate-600 focus:border-cyan-500/50 focus:outline-none focus:ring-2 focus:ring-cyan-500/20 ${
+              fillColumn ? 'min-h-[12rem] flex-1' : ''
+            }`}
           />
           <motion.button
             type="button"
@@ -113,13 +118,13 @@ export default function UploadPanel({
             whileHover={{ scale: loading ? 1 : 1.02 }}
             whileTap={{ scale: loading ? 1 : 0.98 }}
             onClick={onSubmitPaste}
-            className="w-full rounded-xl bg-gradient-to-r from-cyan-500 to-violet-600 px-6 py-4 font-semibold text-white shadow-lg shadow-cyan-500/25 transition hover:shadow-cyan-500/40 disabled:opacity-50"
+            className="mt-auto w-full shrink-0 rounded-xl bg-gradient-to-r from-cyan-500 to-violet-600 px-6 py-4 font-semibold text-white shadow-lg shadow-cyan-500/25 transition hover:shadow-cyan-500/40 disabled:opacity-50"
           >
             {loading ? 'Analyzing…' : 'Run NLP pipeline'}
           </motion.button>
-        </>
+        </div>
       ) : (
-        <>
+        <div className={fillColumn ? 'flex min-h-0 flex-1 flex-col' : ''}>
           <div
             role="button"
             tabIndex={0}
@@ -137,6 +142,8 @@ export default function UploadPanel({
               if (f) setFile(f)
             }}
             className={`mb-6 flex min-h-[200px] cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed px-6 py-12 transition ${
+              fillColumn ? 'min-h-0 flex-1' : ''
+            } ${
               drag
                 ? 'border-cyan-400/60 bg-cyan-500/10'
                 : 'border-white/15 bg-black/25 hover:border-white/25'
@@ -171,11 +178,13 @@ export default function UploadPanel({
             whileHover={{ scale: loading || !file ? 1 : 1.02 }}
             whileTap={{ scale: loading || !file ? 1 : 0.98 }}
             onClick={onSubmitFile}
-            className="w-full rounded-xl bg-gradient-to-r from-cyan-500 to-violet-600 px-6 py-4 font-semibold text-white shadow-lg shadow-violet-500/25 transition hover:shadow-violet-500/40 disabled:opacity-50"
+            className={`w-full rounded-xl bg-gradient-to-r from-cyan-500 to-violet-600 px-6 py-4 font-semibold text-white shadow-lg shadow-violet-500/25 transition hover:shadow-violet-500/40 disabled:opacity-50 ${
+              fillColumn ? 'mt-auto shrink-0' : ''
+            }`}
           >
             {loading ? 'Analyzing…' : 'Upload & analyze'}
           </motion.button>
-        </>
+        </div>
       )}
       </div>
 

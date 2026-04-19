@@ -100,6 +100,7 @@ function deadlineLabel(item) {
 }
 
 export default function CalendarPanel({
+  className = '',
   authVersion = 0,
   meetingId,
   meetingTitle,
@@ -277,7 +278,7 @@ export default function CalendarPanel({
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
-        className="rounded-2xl border border-white/10 bg-black/30 p-6 backdrop-blur-xl"
+        className={`rounded-2xl border border-white/10 bg-black/30 p-6 backdrop-blur-xl ${className}`}
       >
         <h3 className="text-sm font-semibold text-white">Google Calendar</h3>
         <p className="mt-2 text-sm text-slate-500">
@@ -304,7 +305,7 @@ export default function CalendarPanel({
     <motion.div
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
-      className="rounded-2xl border border-white/10 bg-black/30 p-6 backdrop-blur-xl"
+      className={`rounded-2xl border border-white/10 bg-black/30 p-6 backdrop-blur-xl ${className}`}
     >
       <div className="flex flex-wrap items-start justify-between gap-2">
         <h3 className="text-sm font-semibold text-white">Google Calendar</h3>
