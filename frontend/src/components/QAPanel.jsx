@@ -51,8 +51,13 @@ export default function QAPanel({ meetingId, onAsk, loading, messages, className
                 }`}
               >
                 {m.role === 'assistant' && m.confidence != null && (
-                  <span className="mb-1 block text-[10px] uppercase tracking-wider text-slate-500">
+                  <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-slate-500">
                     confidence {(m.confidence * 100).toFixed(0)}%
+                  </span>
+                )}
+                {m.role === 'assistant' && m.latencyMs != null && (
+                  <span className="mb-1 block text-[10px] uppercase tracking-wider text-slate-500">
+                    latency {m.latencyMs} ms
                   </span>
                 )}
                 {m.text}

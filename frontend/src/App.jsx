@@ -202,21 +202,25 @@ export default function App() {
     if (!result?.meeting_id) return
     setMessages((m) => [...m, { role: 'user', text: question }])
     setQaLoading(true)
+    const started = performance.now()
     try {
       const data = await askQuestion({ meetingId: result.meeting_id, question })
+      const latencyMs = Math.round(performance.now() - started)
       setMessages((m) => [
         ...m,
         {
           role: 'assistant',
           text: data.answer,
           confidence: data.confidence,
+          latencyMs,
         },
       ])
     } catch (e) {
+      const latencyMs = Math.round(performance.now() - started)
       const msg = e.response?.data?.detail || e.message || 'Ask failed'
       setMessages((m) => [
         ...m,
-        { role: 'assistant', text: String(msg), confidence: 0 },
+        { role: 'assistant', text: String(msg), confidence: 0, latencyMs },
       ])
     } finally {
       setQaLoading(false)
