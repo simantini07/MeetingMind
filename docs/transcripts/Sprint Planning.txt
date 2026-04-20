@@ -1,0 +1,93 @@
+[Natarajan, Nikitha] 12:51:44
+Hi, everyone. How about you all?
+
+[shreya] 12:51:47
+I'm doing good, how are you, Nikita?
+
+[Natarajan, Nikitha] 12:51:50
+I'm doing great. Thank you. How are you, Simanjini?
+
+[Rembhotkar, Simantini] 12:51:53
+Yeah, I'm good, I'm good. How has been your week going on?
+
+[shreya] 12:51:58
+It's been quite hectic.
+
+[Natarajan, Nikitha] 12:51:59
+that.
+
+[shreya] 12:52:01
+Actually… yeah.
+
+[Rembhotkar, Simantini] 12:52:03
+No. Great. Yeah, same. Now, just, you know, work and work, nothing else.
+
+[shreya] 12:52:05
+But about you?
+
+[shreya] 12:52:12
+Yeah…
+
+[Natarajan, Nikitha] 12:52:15
+Okay, then let's start with our meeting. So first, st we need to wrap phase one of the support assistance soon. So can we lock tasks and deadlines now?
+
+[shreya] 12:52:26
+Yes, please.
+
+[Rembhotkar, Simantini] 12:52:26
+Uh, yes. I'll finish the dashboard UI updates by Tuesday, around 5pm.
+
+[shreya] 12:52:35
+Okay, I'll complete model evaluation and confidence threshold recommendation by Wednesday, 11am.
+
+[Natarajan, Nikitha] 12:52:43
+Great. Then I'll finalize back-end API cleanup and deployment config by Tuesday EOD.
+
+[Rembhotkar, Simantini] 12:52:50
+Oh, I also need final API field names by Monday, otherwise UI work gets blocked.
+
+[shreya] 12:52:56
+And I need latest production incident samples by Monday 4pm to run realistic tests.
+
+[shreya] 12:53:03
+If that's okay.
+
+[Natarajan, Nikitha] 12:53:04
+Done. Okay, I'll share the sample test by Monday, 3PM.
+
+[Rembhotkar, Simantini] 12:53:10
+Perfect. I'll push a demo-ready front-end build by Thursday morning.
+
+[shreya] 12:53:15
+Sounds good, I'll send a one-page evaluation summary before the review by Thursday, 2PM.
+
+[Natarajan, Nikitha] 12:53:22
+Alright, then, let's schedule internal dry run for Friday, 10 AM.
+
+[Rembhotkar, Simantini] 12:53:27
+Works for me. If anything slips, we flag it by Thursday evening.
+
+[shreya] 12:53:32
+Agreed. Final status update in Slack by Friday 9 AM.
+
+[shreya] 12:53:36
+Before the dry run? Sounds good.
+
+[Rembhotkar, Simantini] 12:53:39
+Cool one. Yeah.
+
+[Natarajan, Nikitha] 12:53:40
+Yes.
+
+[shreya] 12:53:40
+Okay. See you guys then!
+
+[shreya] 12:53:43
+Nice to…
+
+[Rembhotkar, Simantini] 12:53:44
+Okay. Talk to you later.
+
+[Natarajan, Nikitha] 12:53:46
+See you. Bye-bye.
+

@@ -1,0 +1,45 @@
+[Natarajan, Nikitha] 12:43:21
+Hey, quick sync. We need to finish the incident assistant by next week.
+
+[Rembhotkar, Simantini] 12:43:27
+Yeah, right now we have summaries, but we still need better action suggestions in the UI.
+
+[Birje, Shreya Rajendra] 12:43:34
+And also, confidence scores need work. They look okay, but not reliable for all issue types.
+
+[Natarajan, Nikitha] 12:43:40
+Okay, so let's keep scope tight. Summary, action, suggestions, and basic confidence labels.
+
+[Rembhotkar, Simantini] 12:43:47
+I can update the UI to show low, or medium or high confidence instead of, like, raw numbers.
+
+[Birje, Shreya Rajendra] 12:43:54
+Good. I'll run a quick evaluation on recent incidents and suggest thresholds.
+
+[Natarajan, Nikitha] 12:44:00
+Okay, then I'll handle backend changes and make sure API response format stays stable.
+
+[Rembhotkar, Simantini] 12:44:08
+Also, can we improve speed a bit? Like, first loads feel slow in demos?
+
+[Birje, Shreya Rajendra] 12:44:14
+If we reduce the rank depth slightly, we should get faster responses with small quality impact.
+
+[Natarajan, Nikitha] 12:44:22
+Cool, let's test both settings and pick the best one by tomorrow.
+
+[Rembhotkar, Simantini] 12:44:28
+Okay, I'll prepare the demo screen once final fields are locked.
+
+[Birje, Shreya Rajendra] 12:44:32
+Done. Then I'll share evaluation results in the morning, and we can finalize right away.
+
+[Rembhotkar, Simantini] 12:44:39
+Okay, that's great meeting you guys. See you, talk to you later. Bye.
+
+[Natarajan, Nikitha] 12:44:43
+Thank you.
+
+[Birje, Shreya Rajendra] 12:44:45
+Thank you
+

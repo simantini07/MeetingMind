@@ -1,0 +1,99 @@
+[shreya] 13:01:37
+Hey, Mikita!
+
+[Natarajan, Nikitha] 13:01:39
+Hi, Shreya. Hi, Simanthini. Good morning.
+
+[shreya] 13:01:42
+Good morning, girl!
+
+[Rembhotkar, Simantini] 13:01:44
+Good morning! I'm great, I'm great, just… Backed up work.
+
+[Natarajan, Nikitha] 13:01:45
+How's it going for you guys?
+
+[shreya] 13:01:49
+I'm doing… yeah.
+
+[shreya] 13:01:52
+Yeah, I'm having beef with my roommate, but other than that, I'm great.
+
+[shreya] 13:01:58
+What about you?
+
+[Natarajan, Nikitha] 13:02:01
+Yeah, everything's going good.
+
+[shreya] 13:02:04
+Okay, any beef with your roommate?
+
+[Natarajan, Nikitha] 13:02:08
+No. Yeah.
+
+[shreya] 13:02:09
+No, good for you.
+
+[Natarajan, Nikitha] 13:02:14
+Okay, so let's start with a meeting. Before we dive in, quick one. We need to lock Phase 1 tasks today.
+
+[Rembhotkar, Simantini] 13:02:24
+Yeah, let's do that. Uh, what are you prioritizing first?
+
+[shreya] 13:02:25
+Agreed.
+
+[shreya] 13:02:31
+Um… we… I think we should finalize the confidence labels and model checks before
+
+[shreya] 13:02:41
+polishing the other things.
+
+[Natarajan, Nikitha] 13:02:44
+Yes, that makes sense. Also, one tiny reminder, demo week is closer than it feels, so I'll take backend API cleanup and deployment config, and I'll finish it by Tuesday.
+
+[Rembhotkar, Simantini] 13:02:58
+Okay, that sounds great. I'll own the front-end updates for the summary and the action cards, and I'll have that done by Wednesday?
+
+[shreya] 13:03:08
+Great, I'll handle evaluation and threshold recommendations from recent incidents, and I'll send the final report by Thursday.
+
+[Natarajan, Nikitha] 13:03:17
+Yeah, that sounds great. That would give us buffer. Also, can we keep this release simple? No major scope ads unless something actually breaks.
+
+[Rembhotkar, Simantini] 13:03:27
+Yeah, agreed. Like, let's not quickly add one more thing this time. If I get the final API field names today, I'm fully unblocked.
+
+[shreya] 13:03:37
+And if I get the latest incident, uh, sample dump, I can…
+
+[shreya] 13:03:42
+Avoid using old data, otherwise numbers might look…
+
+[shreya] 13:03:45
+Uh, better than, you know…
+
+[shreya] 13:03:48
+Too ideal it would look.
+
+[Natarajan, Nikitha] 13:03:51
+done. So I'll share those right after this call, and finally, let's do our next check-in on Friday and review the final status together.
+
+[Rembhotkar, Simantini] 13:04:00
+Cool works for me. I'll also post a short progress update in Slack tomorrow.
+
+[shreya] 13:04:08
+Same here, cool, thanks both, this feels much more under control now.
+
+[Rembhotkar, Simantini] 13:04:14
+Great! It was nice talking to you guys. Have a good day.
+
+[shreya] 13:04:18
+Uh, yes.
+
+[Natarajan, Nikitha] 13:04:19
+Yes, thank you. Goodbye.
+
+[Rembhotkar, Simantini] 13:04:22
+Bye.
+

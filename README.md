@@ -105,6 +105,22 @@ In dev, frontend proxy maps `/api/*` to backend `http://127.0.0.1:8000/*`.
 8. Reopen older meetings from history.
 9. Use the **Calendar** panel: connect your Google account once, then create an event for the open meeting—the form is **prefilled** from the meeting title, summary, and action-item deadlines (you can edit start time, description, timezone, or add a Meet link before saving).
 
+## Application images
+
+Screenshots in **`docs/images/`**:
+
+| File | What it shows |
+|------|----------------|
+| `MeetingMindPage.png` | Main dashboard: upload / paste transcript and analyze |
+| `ResultsPage.png` | Results: summary, tags, action items, follow-ups |
+| `QA_Calendar.png` | Q&A panel and Calendar panel |
+
+![MeetingMind main page](docs/images/MeetingMindPage.png)
+
+![Results page](docs/images/ResultsPage.png)
+
+![Q&A and Calendar](docs/images/QA_Calendar.png)
+
 ## Backend endpoints (main)
 
 - `GET /health` — runtime/config status
@@ -134,6 +150,8 @@ MeetingMind/
     main.py
     google_calendar.py
     requirements.txt
+  docs/
+    images/
   frontend/
     src/
     package.json
